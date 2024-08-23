@@ -6,7 +6,7 @@ use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::time::{Duration, Instant};
 use std::sync::{Mutex, Arc};
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter};
 use std::thread;
 
 #[derive(Debug, StructOpt)]
@@ -45,6 +45,11 @@ impl Snake {
         result
     }
 
+    fn next(&self) -> (i32, i32) {
+        let (head_x, head_y) = self.points.last().unwrap_or(&(0, 0));
+        (*head_x + self.direction.0, *head_y + self.direction.1)
+    }
+
     fn right(&mut self) {
         self.direction = (1, 0);
     }
@@ -62,10 +67,7 @@ impl Snake {
     }
 
     fn run(&mut self) {
-        let mut snake_head = {
-            let l = self.points.last().unwrap_or(&(0,0));
-            (l.0, l.1)
-        };
+        let mut snake_head = self.next();
         snake_head.0 += self.direction.0;
         snake_head.1 += self.direction.1;
 
@@ -100,12 +102,15 @@ fn write_pixels(stream: &mut TcpStream, pixels: &Vec<Pixel>) -> Result<(), Box<d
     Ok(())
 }
 
+const snake_color: &'static str = "00FDFD";
+const food_clor: &'static str = "FD00FD";
+
 fn main() -> Result<(), Box<dyn Error>> {
     let config: Config = Config::from_args();
     let snake = Arc::new(Mutex::new(Snake {
         direction: (0, 0),
         points: vec![(50, 50), (100, 100)],
-        color: "ffffff".to_string(),
+        color: snake_color.to_string(),
         size: 10
     }));
     let mut draw_threads = Vec::new();
@@ -133,15 +138,30 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn snake_movement(address: &str, snake_mutex: Arc<Mutex<Snake>>) {
     let mut stream = TcpStream::connect(address).unwrap();
+    loop {
+        let mut snake = (*snake_mutex).lock().unwrap();
+        let (next_x, next_y) = snake.next();
+        let pixel = get_pixel(&mut stream, next_x, next_y);
+        if pixel.color.as_str() == food_clor {
+            snake.add_tail();
+        }
+        snake.run();
+    }
 }
 
-fn get_pixel(stream: &mut TcpStream, x: i32, y: i32) -> Result<Pixel, Box<dyn Error>> {
+fn get_pixel(stream: &mut TcpStream, x: i32, y: i32) -> Pixel {
+    let mut reader = BufReader::new(&(*stream));
+    let mut writer = BufWriter::new(&(*stream));
+    writer.write_all(format!("PX {} {}", x, y).as_bytes());
+    let mut result = String::new();
+    reader.read_line(&mut result);
+    let mut tokens: Vec<&str> = result.split(" ").collect();
 
-    Ok(Pixel {
+    Pixel {
         x,
         y,
-        color: "".to_string()
-    })
+        color: tokens.pop().unwrap_or("000000").to_string(),
+    }
 }
 
 fn draw(address: &str, snake_mutex: Arc<Mutex<Snake>>) {
@@ -164,10 +184,11 @@ fn draw(address: &str, snake_mutex: Arc<Mutex<Snake>>) {
 }
 
 fn handle_inputs(snake_mutex: Arc<Mutex<Snake>>) {
-    let socket = UdpSocket::bind("127.0.0.1:34254").unwrap();
+    let socket = UdpSocket::bind("127.0.0.1:7331").unwrap();
     let mut byte = [0];
     loop {
         socket.recv(&mut byte).map(|received_size| {
+            println!("receiveddata")
             if received_size > 0 {
                 let character = byte[0] as char;
                 snake_mutex.lock().map(|mut snake| {
